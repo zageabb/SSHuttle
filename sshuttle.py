@@ -991,7 +991,7 @@ class SSHuttleApp:
         try:
             sftp.stat(ready)
         except OSError as exc:
-            if getattr(exc, "errno", None) != errno.ENOENT:
+            if not isinstance(exc, FileNotFoundError) and getattr(exc, "errno", None) != errno.ENOENT:
                 raise
         else:
             self._events.put(("finished", ("Stage", 0, 0, 0)))
