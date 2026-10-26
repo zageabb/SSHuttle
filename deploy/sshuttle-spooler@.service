@@ -1,0 +1,18 @@
+[Unit]
+Description=SSHuttle USB Spooler running as %i
+After=local-fs.target
+# The USB drive may be disconnected. The worker checks the mount before writing.
+
+[Service]
+Type=simple
+User=%i
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/bin/sshuttle_spooler.py --config /etc/sshuttle-spooler.json
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+# Do not add a network listener: jobs and status are read from SFTP staging.
+
+[Install]
+WantedBy=multi-user.target
