@@ -549,8 +549,8 @@ class SSHuttleApp:
                                 continue
                             is_dir = stat.S_ISDIR(attr.st_mode or 0)
                             if not (is_dir or stat.S_ISREG(attr.st_mode or 0)):
-                            continue  # Do not allow selecting remote symlinks/special files.
-                        entries.append((attr.filename, is_dir, attr.st_size or 0,
+                                continue  # Do not allow selecting remote symlinks/special files.
+                            entries.append((attr.filename, is_dir, attr.st_size or 0,
                                             posixpath.join(path, attr.filename)))
                         entries.sort(key=lambda item: (not item[1], item[0].casefold()))
                         self._events.put(("remote_list", (path, entries)))
