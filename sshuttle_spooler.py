@@ -224,7 +224,7 @@ class Spooler:
                         (entry.name, "queued", manifest["subdir"], int(manifest["overwrite"])))
                     for item in manifest["files"]:
                         self.db.execute(
-                            "INSERT INTO entries(job,path,size,checksum) VALUES(?,?,?,?,?)",
+                            "INSERT INTO entries(job,path,size,checksum) VALUES(?,?,?,?)",
                             (entry.name, item["path"], item["size"], item["sha256"]))
                 # Directories are recreated based on manifest during processing;
                 # persist them as original READY marker in the staging directory.
