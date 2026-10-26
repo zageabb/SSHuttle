@@ -6,6 +6,7 @@ Requires: paramiko (see requirements.txt).  Uses Tkinter from Python.
 from __future__ import annotations
 
 import errno
+import math
 import os
 import posixpath
 import queue
@@ -231,7 +232,7 @@ def parse_upload_limit(value: str) -> float:
         limit = float(value.strip())
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("USB upload limit must be a number in MiB/s.") from exc
-    if not 0 <= limit <= 100 or not __import__("math").isfinite(limit):
+    if not 0 <= limit <= 100 or not math.isfinite(limit):
         raise ValueError("USB upload limit must be between 0 and 100 MiB/s.")
     return limit
 
