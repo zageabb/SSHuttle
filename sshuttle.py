@@ -412,7 +412,7 @@ class SSHuttleApp:
         status_bar = ttk.Frame(outer)
         status_bar.pack(fill=X, pady=(0, 7))
         ttk.Label(status_bar, textvariable=self.spool_status).pack(side=LEFT, fill=X, expand=True)
-        ttk.Button(status_bar, text="Check USB queue", command=self._poll_spool_status).pack(side=RIGHT)
+        ttk.Button(status_bar, text="Check USB queue", command=lambda: self._poll_spool_status(schedule=False)).pack(side=RIGHT)
         progress_frame = ttk.Frame(outer)
         progress_frame.pack(fill=X)
         ttk.Label(progress_frame, textvariable=self.transfer_status).pack(anchor="w")
@@ -537,9 +537,6 @@ class SSHuttleApp:
             messagebox.showinfo("SSHuttle", "Select one or more files or folders in the left panel.")
             return
         remote_dir = self.remote_path.get().strip()
-        if not remote_dir.startswith("/"):
-            messagebox.showerror("Remote folder", "Select an absolute remote folder before uploading.")
-            return
         safe_mode = self.usb_safe_mode.get()
         try:
             rate = parse_upload_limit(self.usb_rate_limit.get()) if safe_mode else 0.0
@@ -560,6 +557,9 @@ class SSHuttleApp:
             self._work.put(("spool_upload", (
                 self._local_listed_path, selected, stage,
                 subfolder, self.overwrite.get(), uuid.uuid4().hex)))
+            return
+        if not remote_dir.startswith("/"):
+            messagebox.showerror("Remote folder", "Select an absolute remote folder before uploading.")
             return
         self._cancel_transfer.clear()
         self._set_busy(True)
@@ -584,11 +584,11 @@ class SSHuttleApp:
         self._work.put(("download", (self._remote_listed_path, selected,
                                      local_dir, self.overwrite.get())))
 
-    def _poll_spool_status(self):
+    def _poll_spool_status(self, schedule=True):
         if self._connected and not self._busy:
             for job_id, stage in list(self._spool_jobs.items()):
                 self._work.put(("spool_status", (stage, job_id)))
-        if self.root.winfo_exists():
+        if schedule and self.root.winfo_exists():
             self.root.after(5000, self._poll_spool_status)
 
     def _cancel(self):
@@ -692,7 +692,8 @@ class SSHuttleApp:
                     if not self._cancel_transfer.is_set():
                         self.progress_bar.configure(value=100)
                         self.progress_label.set("100%")
-                    self.transfer_status.set(f"Complete: {completed} {direction.lower()}ed, {skipped} skipped, {total} considered.")
+                    verb = "staged" if direction == "Stage" else f"{direction.lower()}ed"
+                    self.transfer_status.set(f"Complete: {completed} {verb}, {skipped} skipped, {total} considered.")
                     self._log(self.transfer_status.get())
                     if direction == "Upload":
                         self._work.put(("list", self._remote_listed_path))
