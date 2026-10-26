@@ -138,7 +138,7 @@ def manifest_for_download(sftp, remote_root: str, selected_paths: list[str]):
         if relative == ".." or relative.startswith("../") or relative in (".", ""):
             raise ValueError("Selected remote item must be inside the remote folder.")
         # Check every relative component: remote names may be untrusted.
-        if any(part in ("", ".", "..") or "\" in part or "\x00" in part
+        if any(part in ("", ".", "..") or chr(92) in part or "\x00" in part
                for part in relative.split("/")):
             raise ValueError(f"Unsafe remote filename: {relative!r}")
         info = sftp.lstat(remote)  # lstat, not stat: do not follow remote links
@@ -149,7 +149,7 @@ def manifest_for_download(sftp, remote_root: str, selected_paths: list[str]):
             dirs.add(relative)
             for item in sftp.listdir_attr(remote):
                 name = item.filename
-                if name in ("", ".", "..") or "/" in name or "\" in name or "\x00" in name:
+                if name in ("", ".", "..") or "/" in name or chr(92) in name or "\x00" in name:
                     raise ValueError(f"Unsafe remote directory entry: {name!r}")
                 stack.append(posixpath.join(remote, name))
         elif stat.S_ISREG(mode):
@@ -165,7 +165,7 @@ def safe_local_target(root: Path, relative: str, is_directory: bool = False) -> 
     Must be called by the transfer worker only. Caller supplies a resolved root.
     """
     parts = relative.split("/")
-    if any(part in ("", ".", "..") or "\" in part or "\x00" in part for part in parts):
+    if any(part in ("", ".", "..") or chr(92) in part or "\x00" in part for part in parts):
         raise ValueError(f"Unsafe local destination relative path: {relative!r}")
     if not root.is_dir() or root.is_symlink():
         raise NotADirectoryError(f"Local destination is unavailable: {root}")
