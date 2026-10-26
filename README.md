@@ -2,19 +2,19 @@
 
 SSHuttle is a simple **Python desktop app** for transferring files from a local computer to an Ubuntu server over SSH/SFTP. It is designed for local use on macOS, Linux, or Windows.
 
-## Version 0.1 features
+## Features
 
 - Side-by-side local and remote file browsers, folder navigation and editable directory paths.
-- Select multiple local files and/or folders for recursive uploads.
-- Progress bar, byte counters, current file, transfer summary and cancellation.
+- Select multiple files or folders on either side for recursive uploads **and downloads**.
+- Progress bar, byte counters, current file, transfer summary and cancellation for both directions.
 - Connection by hostname/IP or OpenSSH Host alias from ~/.ssh/config.
 - SSH agent and local private keys attempted automatically; optional user, password or key passphrase.
 - SSH host keys verified against ~/.ssh/known_hosts (no automatic acceptance of unknown host keys).
-- Remote files are skipped by default, with an explicit option to replace them.
-- Upload to a temporary file and rename it only after completion, helping to protect existing files.
+- Existing destination files are skipped by default, with an explicit option to replace them.
+- Write transfers to temporary files, committing completed uploads/downloads safely.
 - Passwords are never written to disk.
 
-Version 0.1 is **local-to-server upload only**. Downloads can be added in a later release.
+**Slow-server recovery:** 60-second connection timeout (configurable up to 300 seconds), 90-second minimum SSH authentication/banner timeouts, and longer SFTP inactivity timeouts. SSH keepalives every 30 seconds, plus three retries by default (configurable 0–5), automatically reconnect after temporary failures. A failed transfer attempt restarts the operation rather than resuming partway through an individual file.
 
 ## Install
 
@@ -49,24 +49,28 @@ Enter ubuntu-home into the server field. The username and port can be left blank
 
 OpenSSH ProxyJump and ProxyCommand directives are not supported in v0.1. Hardware-backed key types may also need separate support.
 
-## Upload
+## Upload and download
 
 1. Connect using host/IP or SSH config alias.
-2. Browse to the source folder on the left; select one or more files or subfolders.
-3. Browse to the destination on the right, or enter an absolute remote path and click Go.
-4. Press **Upload selected →**. Monitor current filename, total bytes and percentage.
-5. By default files already on the server are skipped. Check **Replace existing remote files** to overwrite.
+2. For **upload**, browse to the source folder on the left and destination on the right, select local files/folders, then press **Upload selected →**.
+3. For **download**, browse to the destination folder on the left and source on the right, select remote files/folders, then press **← Download selected**.
+4. Monitor the filename, bytes and progress bar. Press **Cancel transfer** to stop.
+5. Existing destination files are skipped. To replace files, check **Replace existing destination files**.
+
+The **Timeout per connection** input defaults to 60 seconds and supports 15–300 seconds. **Retries** defaults to 3 (range 0–5). If your Ubuntu server is frequently busy, try a 120–180 second connection timeout and 4 retries. SFTP operation timeout scales to at least 120 seconds and at most 600 seconds.
+
+A temporary disconnect triggers a new SSH connection and retries the operation. Transfers **restart the interrupted file**, not byte-level resume. Finished destination files remain in place; in default skip mode they will not be re-transferred. With overwrite enabled, a retry may retransmit files already replaced. Passwords/key passphrases remain only in process memory during the connection to support reconnects, not on disk.
 
 When overwrite is selected, the server must support the SFTP posix-rename extension (typical for Ubuntu OpenSSH). If it is unavailable, SSHuttle leaves existing remote files intact and reports an error.
 
-In-flight temporary uploads are deleted on a best-effort basis after error/cancellation. Previously completed uploads remain. Symbolic links are not followed or transferred.
+In-flight temporary files are deleted on a best-effort basis after error/cancellation. If the SSH connection drops completely, remote orphaned `.sshuttle-*.part` files might remain and can be deleted after checking they are not part of an active transfer. Previously completed transfers remain. Symbolic links are not followed or transferred.
 
 ## Test
 
     python -m py_compile sshuttle.py
     python -m unittest discover -s tests -v
 
-CI checks compilation and unit tests, but does not cover live SSH server interactions or GUI end-to-end behaviour.
+CI checks compilation and unit tests, but does not cover live SSH server interactions, reconnection during actual network loss, or GUI end-to-end behaviour.
 
 ## Design
 

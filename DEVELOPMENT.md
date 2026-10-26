@@ -10,12 +10,16 @@
 - [x] Temporary remote upload files before rename.
 - [ ] Manual macOS-to-Ubuntu end-to-end test.
 
-## v0.2 — Convenience
+## v0.2 — Bidirectional transfer and resilience
 
-- Downloads from server to local machine.
-- Saved non-secret connection profiles and default folders.
-- Drag-and-drop, improved keyboard navigation and transfer history.
-- Richer per-file progress and queue.
+- [x] Downloads from server to local machine, including recursive folders and empty directories.
+- [x] Local destination safety checks, temp files, cancel and skip/overwrite options.
+- [x] Connection timeout and retry settings for slow Ubuntu servers.
+- [x] SSH keepalives and automatic reconnect/retry on temporary network errors.
+- [ ] Validate live timeout recovery by interrupting a transfer over SSH.
+- [ ] Saved non-secret connection profiles and default folders.
+- [ ] Drag-and-drop, improved keyboard navigation and transfer history.
+- [ ] Richer per-file progress and queue.
 
 ## v0.3 — Advanced
 
