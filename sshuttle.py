@@ -339,7 +339,9 @@ class SSHuttleApp:
         try:
             while True:
                 kind, payload = self._events.get_nowait()
-                if kind == "connected":
+                if kind == "log":
+                    self._log(str(payload))
+                elif kind == "connected":
                     self._connected = True
                     self.password.set("")  # Do not retain credentials in the UI.
                     self.connect_button.configure(text="Disconnect", state="normal")
