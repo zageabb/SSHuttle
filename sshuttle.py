@@ -665,6 +665,82 @@ class SSHuttleApp:
             self._events.put(("progress", (done, total, relative_file)))
         self._events.put(("finished", ("Upload", completed, skipped, len(files) + skipped_links)))
 
+    def _receive_files(self, sftp, remote_root, selected_paths, local_root, overwrite):
+        """Download selected remote files/folders, committing files only after success."""
+        local_root = Path(local_root).resolve(strict=True)
+        if not local_root.is_dir():
+            raise NotADirectoryError(f"Local destination is not a directory: {local_root}")
+        directories, files, skipped_links = manifest_for_download(sftp, remote_root, selected_paths)
+        total = sum(size for _, _, size in files)
+        self._events.put(("started", ("Download", len(files), total)))
+        if skipped_links:
+            self._events.put(("log", f"Skipped {skipped_links} remote symlinks or special files."))
+        completed = 0
+        skipped = skipped_links
+        done = 0
+        for relative_dir in directories:
+            if self._cancel_transfer.is_set():
+                raise TransferCancelled()
+            safe_local_target(local_root, relative_dir, is_directory=True)
+        for remote_file, relative_file, size in files:
+            if self._cancel_transfer.is_set():
+                raise TransferCancelled()
+            destination = safe_local_target(local_root, relative_file)
+            if destination.is_dir():
+                raise IsADirectoryError(f"Local destination is a folder: {destination}")
+            if destination.exists() and not overwrite:
+                skipped += 1
+                done += size
+                self._events.put(("progress", (done, total, f"Skipped {relative_file} (exists)")))
+                continue
+            temporary = destination.with_name(
+                f".{destination.name}.sshuttle-{uuid.uuid4().hex}.part")
+            previous_done = done
+            last_update = 0.0
+
+            def on_progress(received, file_size):
+                nonlocal last_update
+                if self._cancel_transfer.is_set():
+                    raise TransferCancelled()
+                now = time.monotonic()
+                if now - last_update >= 0.08 or received == file_size:
+                    self._events.put(("progress", (previous_done + received, total, relative_file)))
+                    last_update = now
+
+            try:
+                # Exclusive temp file creation, in the same folder for atomic rename.
+                with temporary.open("xb"):
+                    pass
+                sftp.get(remote_file, str(temporary), callback=on_progress)
+                if self._cancel_transfer.is_set():
+                    raise TransferCancelled()
+                if temporary.stat().st_size != size:
+                    raise OSError(f"Remote file changed size while downloading: {relative_file}")
+                if destination.is_symlink():
+                    raise ValueError(f"Refusing symbolic link destination: {destination}")
+                if overwrite:
+                    os.replace(temporary, destination)
+                else:
+                    # Hard-link no-clobber commit is atomic: os.rename silently
+                    # overwrites on POSIX, so never use it in skip-existing mode.
+                    try:
+                        os.link(temporary, destination)
+                    except FileExistsError:
+                        skipped += 1
+                        done += size
+                        self._events.put(("progress", (done, total, f"Skipped {relative_file} (exists)")))
+                        continue
+            finally:
+                # Remove the temp file after a linked commit or interrupted transfer.
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            completed += 1
+            done += size
+            self._events.put(("progress", (done, total, relative_file)))
+        self._events.put(("finished", ("Download", completed, skipped, len(files) + skipped_links)))
+
     def _close(self):
         self._cancel_transfer.set()
         self._work.put(("exit", None))
