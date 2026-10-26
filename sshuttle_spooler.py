@@ -45,10 +45,10 @@ def relative_path(value: str, allow_empty: bool = False) -> str:
 
 def config_from_file(path: Path) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8"))
+    if not Path(cfg["staging_root"]).expanduser().is_absolute() or not Path(cfg["usb_mount"]).expanduser().is_absolute():
+        raise ValueError("Absolute staging_root and usb_mount paths required")
     cfg["staging_root"] = Path(cfg["staging_root"]).expanduser().resolve()
     cfg["usb_mount"] = Path(cfg["usb_mount"]).expanduser().resolve()
-    if not cfg["staging_root"].is_absolute() or not cfg["usb_mount"].is_absolute():
-        raise ValueError("Absolute staging_root and usb_mount paths required")
     if cfg["staging_root"] == cfg["usb_mount"] or cfg["usb_mount"] in cfg["staging_root"].parents:
         raise ValueError("Staging must not be on the USB target")
     cfg["limit_mib"] = float(cfg.get("limit_mib", 2))
@@ -179,7 +179,10 @@ class Spooler:
             digest = item.get("sha256")
             if type(size) is not int or size < 0 or not isinstance(digest, str) or not SHA256.fullmatch(digest):
                 raise ValueError(f"Invalid size/checksum: {name}")
-            source = safe_path(job_dir / "files", name)
+            file_root = job_dir / "files"
+            if file_root.is_symlink():
+                raise ValueError("Staging data directory cannot be a symlink")
+            source = safe_path(file_root, name)
             info = source.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_size != size:
                 raise ValueError(f"Incomplete staged file: {name}")
@@ -248,6 +251,8 @@ class Spooler:
         self.write_status(job_id)
 
     def ensure_directory(self, relative: str):
+        if not self.usb_ready():
+            raise OSError("USB was unmounted before creating destination directory")
         path = safe_path(self.usb, relative, create_dirs=True)
         if path.is_symlink():
             raise ValueError(f"Refusing symlink folder: {path}")
@@ -261,6 +266,8 @@ class Spooler:
         if not staged.is_file() or staged.is_symlink() or staged.stat().st_size != size:
             raise IOError(f"Staging file missing or changed: {rel}")
         relative_dest = f"{subdir}/{rel}" if subdir else rel
+        if not self.usb_ready():
+            raise OSError("USB was unmounted before creating the destination")
         target = safe_path(self.usb, relative_dest, create_dirs=True)
         if target.exists() and not overwrite:
             return "skipped"
@@ -280,6 +287,8 @@ class Spooler:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
+            if not self.usb_ready():
+                raise OSError("USB was unmounted before opening the output file")
             with staged.open("rb") as source, os.fdopen(os.open(temp, flags, 0o600), "wb") as output:
                 while not self.stop.is_set():
                     chunk = source.read(CHUNK)
