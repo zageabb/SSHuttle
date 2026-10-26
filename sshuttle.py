@@ -119,6 +119,72 @@ def manifest_for_upload(local_root: Path, selected_paths: list[Path]):
     return sorted(dirs, key=lambda d: (d.count("/"), d)), files, skipped
 
 
+
+def manifest_for_download(sftp, remote_root: str, selected_paths: list[str]):
+    """List regular files below selected remote paths without following symlinks.
+
+    Return (relative_directories, [(absolute_remote, relative, size)], skipped).
+    """
+    root = posixpath.normpath(remote_root)
+    if not root.startswith("/"):
+        raise ValueError("Remote source folder must be an absolute path.")
+    dirs: set[str] = set()
+    files: list[tuple[str, str, int]] = []
+    skipped = 0
+    stack = list(selected_paths)
+    while stack:
+        remote = posixpath.normpath(stack.pop())
+        relative = posixpath.relpath(remote, root)
+        if relative == ".." or relative.startswith("../") or relative in (".", ""):
+            raise ValueError("Selected remote item must be inside the remote folder.")
+        # Check every relative component: remote names may be untrusted.
+        if any(part in ("", ".", "..") or "\" in part or "\x00" in part
+               for part in relative.split("/")):
+            raise ValueError(f"Unsafe remote filename: {relative!r}")
+        info = sftp.lstat(remote)  # lstat, not stat: do not follow remote links
+        mode = info.st_mode or 0
+        if stat.S_ISLNK(mode):
+            skipped += 1
+        elif stat.S_ISDIR(mode):
+            dirs.add(relative)
+            for item in sftp.listdir_attr(remote):
+                name = item.filename
+                if name in ("", ".", "..") or "/" in name or "\" in name or "\x00" in name:
+                    raise ValueError(f"Unsafe remote directory entry: {name!r}")
+                stack.append(posixpath.join(remote, name))
+        elif stat.S_ISREG(mode):
+            files.append((remote, relative, info.st_size or 0))
+        else:
+            skipped += 1
+    return sorted(dirs, key=lambda d: (d.count("/"), d)), sorted(files, key=lambda f: f[1]), skipped
+
+
+def safe_local_target(root: Path, relative: str, is_directory: bool = False) -> Path:
+    """Create necessary local parent folders, rejecting escapes and symbolic links.
+
+    Must be called by the transfer worker only. Caller supplies a resolved root.
+    """
+    parts = relative.split("/")
+    if any(part in ("", ".", "..") or "\" in part or "\x00" in part for part in parts):
+        raise ValueError(f"Unsafe local destination relative path: {relative!r}")
+    if not root.is_dir() or root.is_symlink():
+        raise NotADirectoryError(f"Local destination is unavailable: {root}")
+    current = root
+    for part in parts[:-1] if not is_directory else parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"Refusing symbolic link folder: {current}")
+        if current.exists():
+            if not current.is_dir():
+                raise NotADirectoryError(f"Not a directory: {current}")
+        else:
+            current.mkdir()
+    destination = current if is_directory else current / parts[-1]
+    if destination.is_symlink():
+        raise ValueError(f"Refusing symbolic link destination: {destination}")
+    return destination
+
+
 class SSHuttleApp:
     def __init__(self, root: Tk):
         self.root = root
