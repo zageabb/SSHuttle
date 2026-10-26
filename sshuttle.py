@@ -6,6 +6,8 @@ Requires: paramiko (see requirements.txt).  Uses Tkinter from Python.
 from __future__ import annotations
 
 import errno
+import hashlib
+import json
 import math
 import os
 import posixpath
@@ -278,6 +280,29 @@ def upload_with_backpressure(sftp, source: Path, temporary: str, size: int,
         raise IOError(f"Remote file size mismatch ({attrs.st_size} vs {size} bytes).")
 
 
+def spool_subdirectory(name: str) -> str:
+    value = name.strip()
+    if value and (len(value) > 4096 or value.startswith("/") or "\\" in value
+                  or "\x00" in value or any(p in ("", ".", "..") for p in value.split("/"))):
+        raise ValueError("USB destination must be a relative folder without '..'.")
+    return value
+
+
+def make_spool_manifest(local_root, selected, job_id, dest_subdir, overwrite):
+    dirs, files, skipped = manifest_for_upload(local_root, selected)
+    result = {"version": 1, "job_id": job_id, "destination_subdir": spool_subdirectory(dest_subdir),
+              "overwrite": bool(overwrite), "dirs": dirs, "files": []}
+    for source, rel, size in files:
+        digest = hashlib.sha256()
+        with source.open("rb") as stream:
+            for data in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(data)
+        if source.stat().st_size != size:
+            raise ValueError(f"Source changed while uploading: {rel}")
+        result["files"].append({"path": rel, "size": size, "sha256": digest.hexdigest()})
+    return result
+
+
 class SSHuttleApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -293,6 +318,11 @@ class SSHuttleApp:
         self.retry_count = StringVar(value="3")
         self.usb_safe_mode = BooleanVar(value=False)
         self.usb_rate_limit = StringVar(value="2")
+        self.use_spooler = BooleanVar(value=False)
+        self.spooler_root = StringVar(value="/srv/sshuttle/staging")
+        self.usb_subfolder = StringVar()
+        self.spool_status = StringVar(value="USB Spooler: no queued jobs")
+        self._spool_jobs = {}
         self.local_path = StringVar(value=str(Path.home()))
         self.remote_path = StringVar(value="")
         self.overwrite = BooleanVar(value=False)
@@ -314,6 +344,7 @@ class SSHuttleApp:
         self._thread = threading.Thread(target=self._worker, daemon=True, name="sshuttle-sftp")
         self._thread.start()
         self.root.after(80, self._drain_events)
+        self.root.after(5000, self._poll_spool_status)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
     def _build_ui(self):
@@ -343,6 +374,13 @@ class SSHuttleApp:
             row=2, column=3, sticky="w", pady=(8, 0))
         ttk.Entry(credentials, textvariable=self.usb_rate_limit, width=8).grid(
             row=3, column=3, sticky="w")
+        ttk.Checkbutton(credentials, text="Send via USB Spooler", variable=self.use_spooler).grid(
+            row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(credentials, text="Ubuntu staging folder").grid(row=4, column=1, sticky="w")
+        ttk.Entry(credentials, textvariable=self.spooler_root).grid(row=5, column=1, sticky="ew")
+        ttk.Label(credentials, text="USB destination subfolder").grid(row=4, column=2, sticky="w")
+        ttk.Entry(credentials, textvariable=self.usb_subfolder).grid(
+            row=5, column=2, columnspan=2, sticky="ew")
         credentials.columnconfigure(0, weight=2)
         credentials.columnconfigure(1, weight=1)
         credentials.columnconfigure(3, weight=1)
@@ -371,6 +409,10 @@ class SSHuttleApp:
         ttk.Checkbutton(controls, text="Replace existing destination files", variable=self.overwrite).pack(side=LEFT, padx=8)
         ttk.Button(controls, text="Refresh", command=self._refresh).pack(side=RIGHT)
 
+        status_bar = ttk.Frame(outer)
+        status_bar.pack(fill=X, pady=(0, 7))
+        ttk.Label(status_bar, textvariable=self.spool_status).pack(side=LEFT, fill=X, expand=True)
+        ttk.Button(status_bar, text="Check USB queue", command=lambda: self._poll_spool_status(schedule=False)).pack(side=RIGHT)
         progress_frame = ttk.Frame(outer)
         progress_frame.pack(fill=X)
         ttk.Label(progress_frame, textvariable=self.transfer_status).pack(anchor="w")
@@ -495,14 +537,29 @@ class SSHuttleApp:
             messagebox.showinfo("SSHuttle", "Select one or more files or folders in the left panel.")
             return
         remote_dir = self.remote_path.get().strip()
-        if not remote_dir.startswith("/"):
-            messagebox.showerror("Remote folder", "Select an absolute remote folder before uploading.")
-            return
         safe_mode = self.usb_safe_mode.get()
         try:
             rate = parse_upload_limit(self.usb_rate_limit.get()) if safe_mode else 0.0
         except ValueError as exc:
             messagebox.showerror("USB upload limit", str(exc))
+            return
+        if self.use_spooler.get():
+            try:
+                subfolder = spool_subdirectory(self.usb_subfolder.get())
+                stage = self.spooler_root.get().strip().rstrip("/")
+                if not stage.startswith("/") or stage in ("/", "/tmp", "/var/tmp"):
+                    raise ValueError("Enter an absolute dedicated Ubuntu staging directory.")
+            except ValueError as exc:
+                messagebox.showerror("USB Spooler", str(exc))
+                return
+            self._cancel_transfer.clear()
+            self._set_busy(True)
+            self._work.put(("spool_upload", (
+                self._local_listed_path, selected, stage,
+                subfolder, self.overwrite.get(), uuid.uuid4().hex)))
+            return
+        if not remote_dir.startswith("/"):
+            messagebox.showerror("Remote folder", "Select an absolute remote folder before uploading.")
             return
         self._cancel_transfer.clear()
         self._set_busy(True)
@@ -526,6 +583,13 @@ class SSHuttleApp:
         self._set_busy(True)
         self._work.put(("download", (self._remote_listed_path, selected,
                                      local_dir, self.overwrite.get())))
+
+    def _poll_spool_status(self, schedule=True):
+        if self._connected and not self._busy:
+            for job_id, stage in list(self._spool_jobs.items()):
+                self._work.put(("spool_status", (stage, job_id)))
+        if schedule and self.root.winfo_exists():
+            self.root.after(5000, self._poll_spool_status)
 
     def _cancel(self):
         self._cancel_transfer.set()
@@ -563,6 +627,21 @@ class SSHuttleApp:
                 elif kind == "recovered":
                     self.connection_status.set("Connected")
                     self._log("SSH connection restored.")
+                elif kind == "spool_queued":
+                    stage, job_id = payload
+                    self._spool_jobs[job_id] = stage
+                    self.spool_status.set(f"USB Spooler job {job_id[:8]} queued")
+                    self._log(f"Staged job {job_id} for Ubuntu USB service")
+                elif kind == "spool_status":
+                    job_id, status = payload
+                    self.spool_status.set(
+                        f"USB {job_id[:8]}: {status.get('state', 'pending')} "
+                        f"{status.get('completed_files', 0)}/{status.get('total_files', 0)} files · "
+                        f"{human_size(status.get('copied_bytes', 0))}/"
+                        f"{human_size(status.get('total_bytes', 0))}"
+                        + (f" · {status['error']}" if status.get("error") else ""))
+                    if status.get("state") == "completed":
+                        self._spool_jobs.pop(job_id, None)
                 elif kind == "connected":
                     self._connected = True
                     self.password.set("")  # Do not retain credentials in the UI.
@@ -613,7 +692,8 @@ class SSHuttleApp:
                     if not self._cancel_transfer.is_set():
                         self.progress_bar.configure(value=100)
                         self.progress_label.set("100%")
-                    self.transfer_status.set(f"Complete: {completed} {direction.lower()}ed, {skipped} skipped, {total} considered.")
+                    verb = "staged" if direction == "Stage" else f"{direction.lower()}ed"
+                    self.transfer_status.set(f"Complete: {completed} {verb}, {skipped} skipped, {total} considered.")
                     self._log(self.transfer_status.get())
                     if direction == "Upload":
                         self._work.put(("list", self._remote_listed_path))
@@ -771,11 +851,25 @@ class SSHuttleApp:
                         if sftp is None:
                             self._events.put(("disconnected", None))
                         self._events.put(("error", f"Cannot browse remote folder: {exc}"))
-                elif action in ("upload", "download"):
+                elif action == "spool_status":
+                    try:
+                        stage, job_id = data
+                        if sftp is None:
+                            continue
+                        with sftp.open(posixpath.join(stage, "jobs", job_id, "status.json"), "r") as handle:
+                            raw = handle.read()
+                            status = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                        if status.get("job_id") == job_id:
+                            self._events.put(("spool_status", (job_id, status)))
+                    except (OSError, ValueError, UnicodeError):
+                        pass
+                elif action in ("upload", "download", "spool_upload"):
                     try:
                         def transfer(conn):
                             if action == "upload":
                                 return self._send_files(conn, *data)
+                            if action == "spool_upload":
+                                return self._upload_to_spooler(conn, *data)
                             return self._receive_files(conn, *data)
 
                         run_with_recovery(action.capitalize(), transfer, is_transfer=True)
@@ -816,7 +910,7 @@ class SSHuttleApp:
                 return False
             raise
 
-    def _send_files(self, sftp, local_root, selected_paths, remote_root, overwrite, usb_safe=False, usb_rate=2.0):
+    def _send_files(self, sftp, local_root, selected_paths, remote_root, overwrite, usb_safe=False, usb_rate=2.0, emit_finished=True):
         dirs, files, skipped_links = manifest_for_upload(local_root, selected_paths)
         total = sum(size for _, _, size in files)
         self._events.put(("started", ("Upload", len(files), total)))
@@ -887,7 +981,55 @@ class SSHuttleApp:
             completed += 1
             done += size
             self._events.put(("progress", (done, total, relative_file)))
-        self._events.put(("finished", ("Upload", completed, skipped, len(files) + skipped_links)))
+        if emit_finished:
+            self._events.put(("finished", ("Upload", completed, skipped, len(files) + skipped_links)))
+
+
+    def _upload_to_spooler(self, sftp, root, selected, stage, subfolder, overwrite, job_id):
+        """Standard SFTP upload to staging; READY.json commits the queue job."""
+        job_dir = posixpath.join(stage, "jobs", job_id)
+        ready = posixpath.join(job_dir, "READY.json")
+        try:
+            sftp.stat(ready)
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError) and getattr(exc, "errno", None) != errno.ENOENT:
+                raise
+        else:
+            self._events.put(("finished", ("Stage", 0, 0, 0)))
+            self._events.put(("spool_queued", (stage, job_id)))
+            return
+        dirs, files, skipped = manifest_for_upload(root, selected)
+        expected = sum(size for _, _, size in files) + 2 * 1024**3
+        fs = sftp.statvfs(stage)
+        free = fs.f_bavail * fs.f_frsize
+        if free < expected:
+            raise OSError(f"Not enough staging space: {human_size(free)} free, "
+                          f"{human_size(expected)} required including 2 GiB reserve.")
+        self._mkdir_remote(sftp, posixpath.join(job_dir, "files"))
+        self._send_files(sftp, root, selected, posixpath.join(job_dir, "files"),
+                         overwrite=True, emit_finished=False)
+        if self._cancel_transfer.is_set():
+            raise TransferCancelled()
+        self._events.put(("log", "Upload complete; calculating spooler checksums…"))
+        manifest = make_spool_manifest(root, selected, job_id, subfolder, overwrite)
+        if self._cancel_transfer.is_set():
+            raise TransferCancelled()
+        serialized = json.dumps(manifest, separators=(",", ":")).encode("utf-8")
+        if len(serialized) > 8 * 1024 * 1024:
+            raise ValueError("Job manifest too large; select fewer files.")
+        temporary = posixpath.join(job_dir, f".READY-{uuid.uuid4().hex}.tmp")
+        try:
+            with sftp.file(temporary, "wb") as output:
+                output.write(serialized)
+            sftp.rename(temporary, ready)
+        except BaseException:
+            try:
+                sftp.remove(temporary)
+            except Exception:
+                pass
+            raise
+        self._events.put(("finished", ("Stage", len(files), skipped, len(files) + skipped)))
+        self._events.put(("spool_queued", (stage, job_id)))
 
     def _receive_files(self, sftp, remote_root, selected_paths, local_root, overwrite):
         """Download selected remote files/folders, committing files only after success."""

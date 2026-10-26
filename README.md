@@ -17,6 +17,25 @@ SSHuttle is a simple **Python desktop app** for transferring files from a local 
 
 **Slow-server recovery:** 60-second connection timeout (configurable up to 300 seconds), 90-second minimum SSH authentication/banner timeouts, and longer SFTP inactivity timeouts. SSH keepalives every 30 seconds, plus three retries by default (configurable 0–5), automatically reconnect after temporary failures. A failed transfer attempt restarts the operation rather than resuming partway through an individual file.
 
+## Ubuntu USB Spooler (staged uploads)
+
+SSHuttle also supports a **background Ubuntu USB Spooler**. In the Mac app,
+enable **Send via USB Spooler**. SSHuttle uploads to an internal Ubuntu staging
+directory over standard SFTP, then submits a manifest containing file paths,
+sizes and SHA-256 hashes. A persistent Linux systemd service copies the files
+to the configured **mounted** USB filesystem at a controlled speed (default
+2 MiB/s). Mac and Ubuntu transfers become independent; no network port beyond
+SSH is opened. The service checks the mount, verifies checksums, and deletes
+staged file contents only after job completion. The Mac displays queued and
+USB-copy progress while it remains connected.
+
+**The service must be installed and configured on Ubuntu before enabling
+Spooler mode on the Mac.** Destination subfolders in Spooler mode are *relative
+to the USB mount* defined on Ubuntu, not the remote file browser's directory.
+
+See **[Ubuntu USB Spooler setup](docs/UBUNTU_SPOOLER.md)** for commands,
+configuration, USB mount validation, service management and troubleshooting.
+
 ## Install
 
 Requires Python 3.10+ with Tkinter, an SSH server with SFTP enabled, and the Paramiko package.

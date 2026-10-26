@@ -30,6 +30,20 @@
 - [ ] Validate transfers to a real USB-attached Ubuntu destination under load.
 - [ ] Investigate staging to internal disk with server-side deferred copying if USB stalls persist.
 
+## v0.2.2 — Ubuntu USB Spooler
+
+- [x] Standard SFTP uploads into an internal Ubuntu staging directory.
+- [x] SHA-256 manifest committed atomically after staging upload.
+- [x] Background Python service, SQLite queue and systemd unit.
+- [x] USB mount detection, configurable speed limit and read-back verification.
+- [x] Retry and recover incomplete jobs after Ubuntu service restart.
+- [x] Expose Ubuntu job progress in Mac SSHuttle using SFTP status.json.
+- [x] Do not require an HTTP port or non-SSH credentials.
+- [x] Tests for staging manifests, missing USB mount, overwrites, bad checksums.
+- [ ] Install and validate on the actual Ubuntu server and external USB drive.
+- [ ] Add saved job tracking after restarting the Mac app.
+- [ ] Add pause/retry/requeue controls and staging disk-space queue limit.
+
 ## v0.3 — Advanced
 
 - Resume/retry, checksums and collision preview.

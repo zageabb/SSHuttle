@@ -1,0 +1,10 @@
+{
+  "staging_root": "/srv/sshuttle/staging",
+  "usb_mount": "/mnt/usb",
+  "expected_usb_uuid": "",
+  "limit_mib": 2,
+  "verify_readback": true,
+  "poll_seconds": 5,
+  "max_retries": 10,
+  "min_staging_free_gib": 2
+}

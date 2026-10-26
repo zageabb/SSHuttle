@@ -11,6 +11,17 @@ The Python desktop app lives in sshuttle.py. It uses Tkinter on the main thread 
 7. Test with python -m py_compile sshuttle.py and python -m unittest discover -s tests -v.
 8. Keep DEVELOPMENT.md and README.md current, and distinguish manual tests from CI checks.
 
+## Ubuntu Spooler
+
+- sshuttle_spooler.py is a standalone **stdlib-only** Python Linux service; no remote shell execution or listening HTTP port.
+- Durable SQLite queue under configured internal staging_root. SFTP client places jobs/<uuid>/files then publishes READY.json atomically. Service writes status.json.
+- Never copy unless the configured USB target is actually mounted and different from staging.
+- Validate every manifest path against traversal and symlink escapes. Do not trust remote-uploaded manifests.
+- Verify SHA-256 before commit; preserve already completed destination files unless overwrite was explicitly requested.
+- Keep staged data intact after incomplete/failed jobs. Clear only after verified completion.
+- Install sample systemd template running as an unprivileged existing Ubuntu SSH account.
+- Update docs/UBUNTU_SPOOLER.md when changing paths, protocol or deployment.
+
 ## Slow USB targets
 
 - Keep USB-safe transfers single-threaded with synchronous, non-pipelined SFTP writes and a cancellable speed cap. Preserve fast mode.
