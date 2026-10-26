@@ -224,6 +224,59 @@ def is_temporary_connection_error(exc: BaseException) -> bool:
     return False
 
 
+
+def parse_upload_limit(value: str) -> float:
+    """Limit for USB-friendly uploads in MiB/s; zero disables pacing."""
+    try:
+        limit = float(value.strip())
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("USB upload limit must be a number in MiB/s.") from exc
+    if not 0 <= limit <= 100 or not __import__("math").isfinite(limit):
+        raise ValueError("USB upload limit must be between 0 and 100 MiB/s.")
+    return limit
+
+
+def upload_with_backpressure(sftp, source: Path, temporary: str, size: int,
+                             progress, cancel_event: threading.Event,
+                             limit_mib: float, chunk_size: int = 32768):
+    """Stream bounded writes; wait for each SFTP reply before sending the next.
+
+    Paramiko's sftp.put() enables pipelining, which can flood a slow target.
+    This method explicitly disables pipelining and optionally paces writes.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if not 0 <= limit_mib <= 100:
+        raise ValueError("Invalid USB upload speed")
+    transferred = 0
+    rate = limit_mib * 1024 * 1024
+    with Path(source).open("rb") as source_file:
+        with sftp.file(temporary, "wb", bufsize=0) as remote_file:
+            remote_file.set_pipelined(False)
+            while True:
+                if cancel_event.is_set():
+                    raise TransferCancelled()
+                block = source_file.read(chunk_size)
+                if not block:
+                    break
+                before = time.monotonic()
+                remote_file.write(block)  # synchronous SFTP ACK, no queued writes
+                transferred += len(block)
+                progress(transferred, size)
+                if rate:
+                    pause = len(block) / rate - (time.monotonic() - before)
+                    if pause > 0 and cancel_event.wait(pause):
+                        raise TransferCancelled()
+            if cancel_event.is_set():
+                raise TransferCancelled()
+    if transferred != size:
+        raise IOError(f"Local source changed while uploading ({transferred} vs {size} bytes).")
+    # Match put(confirm=True): a successful close alone is not size validation.
+    attrs = sftp.stat(temporary)
+    if attrs.st_size != size:
+        raise IOError(f"Remote file size mismatch ({attrs.st_size} vs {size} bytes).")
+
+
 class SSHuttleApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -237,6 +290,8 @@ class SSHuttleApp:
         self.password = StringVar()
         self.connect_timeout = StringVar(value="60")
         self.retry_count = StringVar(value="3")
+        self.usb_safe_mode = BooleanVar(value=False)
+        self.usb_rate_limit = StringVar(value="2")
         self.local_path = StringVar(value=str(Path.home()))
         self.remote_path = StringVar(value="")
         self.overwrite = BooleanVar(value=False)
@@ -281,6 +336,12 @@ class SSHuttleApp:
         ttk.Entry(credentials, textvariable=self.connect_timeout, width=7).grid(row=3, column=0, sticky="w")
         ttk.Label(credentials, text="Retries after connection failures").grid(row=2, column=1, sticky="w", pady=(8, 0))
         ttk.Entry(credentials, textvariable=self.retry_count, width=7).grid(row=3, column=1, sticky="w")
+        ttk.Checkbutton(credentials, text="USB-safe uploads", variable=self.usb_safe_mode).grid(
+            row=3, column=2, sticky="w")
+        ttk.Label(credentials, text="USB speed limit (MiB/s, 0 = uncapped)").grid(
+            row=2, column=3, sticky="w", pady=(8, 0))
+        ttk.Entry(credentials, textvariable=self.usb_rate_limit, width=8).grid(
+            row=3, column=3, sticky="w")
         credentials.columnconfigure(0, weight=2)
         credentials.columnconfigure(1, weight=1)
         credentials.columnconfigure(3, weight=1)
@@ -436,9 +497,16 @@ class SSHuttleApp:
         if not remote_dir.startswith("/"):
             messagebox.showerror("Remote folder", "Select an absolute remote folder before uploading.")
             return
+        safe_mode = self.usb_safe_mode.get()
+        try:
+            rate = parse_upload_limit(self.usb_rate_limit.get()) if safe_mode else 0.0
+        except ValueError as exc:
+            messagebox.showerror("USB upload limit", str(exc))
+            return
         self._cancel_transfer.clear()
         self._set_busy(True)
-        self._work.put(("upload", (self._local_listed_path, selected, remote_dir, self.overwrite.get())))
+        self._work.put(("upload", (
+            self._local_listed_path, selected, remote_dir, self.overwrite.get(), safe_mode, rate)))
 
     def _download(self):
         if not self._connected or self._busy:
@@ -646,7 +714,10 @@ class SSHuttleApp:
                     # Retrying from the start of the affected operation:
                     # completed uploads/downloads remain committed; incomplete
                     # temporary files are discarded where possible.
-                    delay = min(2 ** failed_attempt, 8)
+                    # Allow a USB drive extra time to recover or remount after a
+                    # transient storage stall; normal SSH retains short retries.
+                    usb_mode = action == "upload" and len(data) >= 5 and data[4]
+                    delay = min(5 * (2 ** failed_attempt), 30) if usb_mode else min(2 ** failed_attempt, 8)
                     if is_transfer:
                         if self._cancel_transfer.wait(delay):
                             raise TransferCancelled()
@@ -744,10 +815,13 @@ class SSHuttleApp:
                 return False
             raise
 
-    def _send_files(self, sftp, local_root, selected_paths, remote_root, overwrite):
+    def _send_files(self, sftp, local_root, selected_paths, remote_root, overwrite, usb_safe=False, usb_rate=2.0):
         dirs, files, skipped_links = manifest_for_upload(local_root, selected_paths)
         total = sum(size for _, _, size in files)
         self._events.put(("started", ("Upload", len(files), total)))
+        if usb_safe:
+            speed = "uncapped" if usb_rate == 0 else f"{usb_rate:g} MiB/s"
+            self._events.put(("log", f"USB-safe mode: sequential 32 KiB writes, {speed}; slower retry backoff."))
         if skipped_links:
             self._events.put(("log", f"Skipped {skipped_links} symbolic links."))
         completed = 0
@@ -782,7 +856,12 @@ class SSHuttleApp:
                     last_update = now
 
             try:
-                sftp.put(str(local_file), temporary, callback=on_progress, confirm=True)
+                if usb_safe:
+                    upload_with_backpressure(
+                        sftp, local_file, temporary, size, on_progress,
+                        self._cancel_transfer, usb_rate)
+                else:
+                    sftp.put(str(local_file), temporary, callback=on_progress, confirm=True)
                 if self._cancel_transfer.is_set():
                     raise TransferCancelled()
                 if overwrite:
