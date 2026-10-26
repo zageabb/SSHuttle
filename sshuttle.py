@@ -9,6 +9,7 @@ import errno
 import os
 import posixpath
 import queue
+import socket
 import stat
 import threading
 import time
@@ -185,6 +186,44 @@ def safe_local_target(root: Path, relative: str, is_directory: bool = False) -> 
     return destination
 
 
+
+def parse_connection_settings(timeout_text: str, retries_text: str) -> tuple[int, int]:
+    """User-configurable connection limits, with sensible bounds."""
+    try:
+        timeout = int(timeout_text)
+        retries = int(retries_text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Connection timeout and retries must be whole numbers.") from exc
+    if not 15 <= timeout <= 300:
+        raise ValueError("Connection timeout must be between 15 and 300 seconds.")
+    if not 0 <= retries <= 5:
+        raise ValueError("Retries must be between 0 and 5.")
+    return timeout, retries
+
+
+def is_temporary_connection_error(exc: BaseException) -> bool:
+    """Only transient transport failures are safe to retry automatically."""
+    if isinstance(exc, (paramiko.AuthenticationException, paramiko.BadHostKeyException)):
+        return False
+    if isinstance(exc, (socket.timeout, TimeoutError, ConnectionError, EOFError)):
+        return True
+    if isinstance(exc, paramiko.ssh_exception.NoValidConnectionsError):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in (
+            errno.ECONNRESET, errno.ECONNREFUSED, errno.ECONNABORTED,
+            errno.EPIPE, errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH,
+        )
+    if isinstance(exc, paramiko.SSHException):
+        reason = str(exc).lower()
+        return any(word in reason for word in (
+            "timed out", "timeout", "connection reset", "connection lost",
+            "connection closed", "socket", "eof", "banner", "session not active",
+            "no existing session",
+        ))
+    return False
+
+
 class SSHuttleApp:
     def __init__(self, root: Tk):
         self.root = root
@@ -196,6 +235,8 @@ class SSHuttleApp:
         self.username = StringVar()
         self.port = StringVar()
         self.password = StringVar()
+        self.connect_timeout = StringVar(value="60")
+        self.retry_count = StringVar(value="3")
         self.local_path = StringVar(value=str(Path.home()))
         self.remote_path = StringVar(value="")
         self.overwrite = BooleanVar(value=False)
@@ -236,6 +277,10 @@ class SSHuttleApp:
         self.connect_button = ttk.Button(credentials, text="Connect", command=self._connect)
         self.connect_button.grid(row=1, column=4, padx=(0, 8))
         ttk.Label(credentials, textvariable=self.connection_status).grid(row=1, column=5, sticky="w")
+        ttk.Label(credentials, text="Timeout per connection (seconds)").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(credentials, textvariable=self.connect_timeout, width=7).grid(row=3, column=0, sticky="w")
+        ttk.Label(credentials, text="Retries after connection failures").grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(credentials, textvariable=self.retry_count, width=7).grid(row=3, column=1, sticky="w")
         credentials.columnconfigure(0, weight=2)
         credentials.columnconfigure(1, weight=1)
         credentials.columnconfigure(3, weight=1)
@@ -368,7 +413,16 @@ class SSHuttleApp:
         self.connection_status.set("Connecting…")
         self.connect_button.configure(state="disabled")
         # Credentials are sent only to the worker, never saved to a file.
-        self._work.put(("connect", (target, self.password.get())))
+        try:
+            timeout, retries = parse_connection_settings(
+                self.connect_timeout.get(), self.retry_count.get())
+        except ValueError as exc:
+            self.connection_status.set("Disconnected")
+            self.connect_button.configure(state="normal")
+            messagebox.showerror("Connection settings", str(exc))
+            return
+        self._cancel_transfer.clear()
+        self._work.put(("connect", (target, self.password.get(), timeout, retries)))
 
     def _upload(self):
         if not self._connected or self._busy:
@@ -431,6 +485,15 @@ class SSHuttleApp:
                 kind, payload = self._events.get_nowait()
                 if kind == "log":
                     self._log(str(payload))
+                elif kind == "retry":
+                    operation, next_attempt, max_attempts, reason = payload
+                    self.connection_status.set("Reconnecting…")
+                    self.transfer_status.set(
+                        f"{operation}: temporary SSH problem; retry {next_attempt} of {max_attempts}…")
+                    self._log(f"{operation}: retrying after {reason}")
+                elif kind == "recovered":
+                    self.connection_status.set("Connected")
+                    self._log("SSH connection restored.")
                 elif kind == "connected":
                     self._connected = True
                     self.password.set("")  # Do not retain credentials in the UI.
@@ -493,6 +556,7 @@ class SSHuttleApp:
                     self._log(self.transfer_status.get())
                     self._refresh()
                 elif kind == "error":
+                    self.connection_status.set("Disconnected" if not self._connected else "Connected")
                     self._set_busy(False)
                     self.transfer_status.set(f"Error: {payload}")
                     self._log(f"Error: {payload}")
