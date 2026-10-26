@@ -72,16 +72,16 @@ If Ubuntu is writing to an external USB disk that occasionally stalls, tick **US
 
 For a slow drive, try **USB-safe uploads ON**, **2 MiB/s**, **Connection timeout 120–180 seconds**, and **4 retries**. Reconnect to apply changes to SSH timeouts and retry count. USB-safe uploads use a 5, 10, 20, 30 second retry backoff after transient SSH errors; ordinary transfers retain shorter retries.
 
-USB-safe mode is OFF by default, so existing fast SFTP uploads are unchanged. Downloads are unaffected. This feature cannot fix a faulty USB cable, insufficient drive power, hardware resets, or disk filesystem I/O errors. A disconnect during an upload can leave a hidden remote temporary \`.sshuttle-*.part\` file; clean up after confirming it is not active.
+USB-safe mode is OFF by default, so existing fast SFTP uploads are unchanged. Downloads are unaffected. This feature cannot fix a faulty USB cable, insufficient drive power, hardware resets, or disk filesystem I/O errors. A disconnect during an upload can leave a hidden remote temporary `.sshuttle-*.part` file; clean up after confirming it is not active.
 
 To diagnose errors on Ubuntu without changing drive data:
 
-\`\`\`bash
+```bash
 lsblk -o NAME,TRAN,SIZE,FSTYPE,MOUNTPOINTS,MODEL
 lsusb -t
 df -h /path/to/usb/mount
 sudo journalctl -k --since "30 minutes ago" --no-pager | grep -Ei 'usb|uas|reset|i/o error|buffer i/o|ext4|exfat|ntfs|xfs'
-\`\`\`
+```
 
 Look for USB resets/disconnects or I/O errors. Try a different cable/port and powered hub for bus-powered disks, especially if a drive disconnects under load. A safe next architectural option if stalls persist is **upload into an internal Ubuntu staging directory and move to USB using an independent server-side worker**, so the SFTP connection never waits for the slow final drive.
 
