@@ -86,9 +86,8 @@ class SpoolClientTests(unittest.TestCase):
             self.assertEqual(manifest["files"][0]["size"], 3)
             self.assertEqual(manifest["destination_subdir"], "archive")
             self.assertEqual(sftp.events[-1], ("rename", ready))
-            self.assertTrue(any(event == "spool_queued"
-                                for event, _ in iter(app._events.get_nowait, None)
-                                if not app._events.empty()))
+            received = [app._events.get_nowait() for _ in range(app._events.qsize())]
+            self.assertTrue(any(event == "spool_queued" for event, _ in received))
 
 
 if __name__ == "__main__":
