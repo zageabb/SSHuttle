@@ -565,78 +565,156 @@ class SSHuttleApp:
         if self.root.winfo_exists():
             self.root.after(80, self._drain_events)
 
+    @staticmethod
+    def _open_connection(target, password, timeout):
+        """Open a verified SSH connection and give SFTP more time for slow storage."""
+        client = paramiko.SSHClient()
+        try:
+            client.load_system_host_keys()
+            known_hosts = Path.home() / ".ssh" / "known_hosts"
+            if known_hosts.exists():
+                client.load_host_keys(str(known_hosts))
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            client.connect(
+                **target,
+                password=password or None,
+                passphrase=password or None,
+                look_for_keys=True, allow_agent=True,
+                timeout=timeout,
+                auth_timeout=max(90, timeout),
+                banner_timeout=max(90, timeout),
+            )
+            transport = client.get_transport()
+            if transport is None or not transport.is_active():
+                raise ConnectionError("SSH transport closed during connection.")
+            transport.set_keepalive(30)
+            sftp = client.open_sftp()
+            # Timeout here is inactivity between SFTP responses, not a limit
+            # on total duration of a large file transfer.
+            sftp.get_channel().settimeout(max(120, 2 * timeout))
+            return client, sftp
+        except BaseException:
+            client.close()
+            raise
+
     def _worker(self):
         client = None
         sftp = None
+        # Keep credentials only in worker memory while the user is connected.
+        # They are required for reconnecting after an interrupted transfer.
+        session = None
+
+        def close_connection():
+            nonlocal client, sftp
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except OSError:
+                    pass
+                sftp = None
+            if client is not None:
+                try:
+                    client.close()
+                finally:
+                    client = None
+
+        def run_with_recovery(operation, callback, is_transfer=False):
+            nonlocal client, sftp
+            if session is None:
+                raise ConnectionError("Not connected.")
+            target, password, timeout, retries = session
+            for failed_attempt in range(retries + 1):
+                if is_transfer and self._cancel_transfer.is_set():
+                    raise TransferCancelled()
+                try:
+                    if sftp is None:
+                        client, sftp = self._open_connection(target, password, timeout)
+                        if failed_attempt:
+                            self._events.put(("recovered", None))
+                    return callback(sftp)
+                except TransferCancelled:
+                    raise
+                except Exception as exc:
+                    transient = is_temporary_connection_error(exc)
+                    if transient:
+                        close_connection()
+                    if not transient or failed_attempt >= retries:
+                        raise
+                    retry_number = failed_attempt + 1
+                    self._events.put(("retry", (
+                        operation, retry_number, retries, str(exc))))
+                    # Retrying from the start of the affected operation:
+                    # completed uploads/downloads remain committed; incomplete
+                    # temporary files are discarded where possible.
+                    delay = min(2 ** failed_attempt, 8)
+                    if is_transfer:
+                        if self._cancel_transfer.wait(delay):
+                            raise TransferCancelled()
+                    else:
+                        time.sleep(delay)
+            raise RuntimeError("Unreachable retry state")
+
         try:
             while True:
                 action, data = self._work.get()
                 if action == "exit":
                     break
                 if action == "disconnect":
-                    if sftp:
-                        sftp.close()
-                        sftp = None
-                    if client:
-                        client.close()
-                        client = None
+                    close_connection()
+                    session = None
                     self._events.put(("disconnected", None))
                 elif action == "connect":
-                    target, password = data
+                    close_connection()
+                    session = data
                     try:
-                        client = paramiko.SSHClient()
-                        client.load_system_host_keys()
-                        known_hosts = Path.home() / ".ssh" / "known_hosts"
-                        if known_hosts.exists():
-                            client.load_host_keys(str(known_hosts))
-                        client.set_missing_host_key_policy(paramiko.RejectPolicy())
-                        client.connect(**target, password=password or None,
-                            passphrase=password or None, look_for_keys=True,
-                            allow_agent=True, timeout=15, auth_timeout=15, banner_timeout=15)
-                        sftp = client.open_sftp()
-                        home = sftp.normalize(".")
+                        home = run_with_recovery("Connect", lambda conn: conn.normalize("."))
                         self._events.put(("connected", home))
                     except Exception as exc:
-                        if client:
-                            client.close()
-                        client, sftp = None, None
+                        close_connection()
+                        session = None
                         self._events.put(("connect_error", exc))
                 elif action == "list":
                     try:
-                        if sftp is None:
-                            continue
-                        path = sftp.normalize(data)
-                        attributes = sftp.listdir_attr(path)
-                        entries = []
-                        for attr in attributes:
-                            if attr.filename in (".", ".."):
-                                continue
-                            is_dir = stat.S_ISDIR(attr.st_mode or 0)
-                            if not (is_dir or stat.S_ISREG(attr.st_mode or 0)):
-                                continue  # Do not allow selecting remote symlinks/special files.
-                            entries.append((attr.filename, is_dir, attr.st_size or 0,
-                                            posixpath.join(path, attr.filename)))
-                        entries.sort(key=lambda item: (not item[1], item[0].casefold()))
-                        self._events.put(("remote_list", (path, entries)))
+                        def browse(conn):
+                            path = conn.normalize(data)
+                            attributes = conn.listdir_attr(path)
+                            entries = []
+                            for attr in attributes:
+                                if attr.filename in (".", ".."):
+                                    continue
+                                mode = attr.st_mode or 0
+                                is_dir = stat.S_ISDIR(mode)
+                                if not (is_dir or stat.S_ISREG(mode)):
+                                    continue
+                                entries.append((
+                                    attr.filename, is_dir, attr.st_size or 0,
+                                    posixpath.join(path, attr.filename),
+                                ))
+                            entries.sort(key=lambda item: (not item[1], item[0].casefold()))
+                            return path, entries
+
+                        result = run_with_recovery("Browse", browse)
+                        self._events.put(("remote_list", result))
                     except Exception as exc:
+                        if sftp is None:
+                            self._events.put(("disconnected", None))
                         self._events.put(("error", f"Cannot browse remote folder: {exc}"))
                 elif action in ("upload", "download"):
                     try:
-                        if sftp is None:
-                            raise ConnectionError("Not connected.")
-                        if action == "upload":
-                            self._send_files(sftp, *data)
-                        else:
-                            self._receive_files(sftp, *data)
+                        def transfer(conn):
+                            if action == "upload":
+                                return self._send_files(conn, *data)
+                            return self._receive_files(conn, *data)
+
+                        run_with_recovery(action.capitalize(), transfer, is_transfer=True)
                     except TransferCancelled:
                         self._events.put(("cancelled", action.capitalize()))
                     except Exception as exc:
-                        self._events.put(("error", str(exc)))
+                        if sftp is None:
+                            self._events.put(("disconnected", None))
+                        self._events.put(("error", f"{action.capitalize()} stopped after retries: {exc}"))
         finally:
-            if sftp:
-                sftp.close()
-            if client:
-                client.close()
+            close_connection()
 
     @staticmethod
     def _mkdir_remote(sftp, folder: str):
