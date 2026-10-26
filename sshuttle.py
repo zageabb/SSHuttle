@@ -303,6 +303,7 @@ def make_spool_manifest(local_root, selected, job_id, dest_subdir, overwrite):
     return result
 
 
+class SSHuttleApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("SSHuttle - SSH File Transfer")
