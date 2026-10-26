@@ -10,3 +10,10 @@ The Python desktop app lives in sshuttle.py. It uses Tkinter on the main thread 
 6. Do not follow symlinks automatically; prevent recursive cycles.
 7. Test with python -m py_compile sshuttle.py and python -m unittest discover -s tests -v.
 8. Keep DEVELOPMENT.md and README.md current, and distinguish manual tests from CI checks.
+
+## Slow USB targets
+
+- Keep USB-safe transfers single-threaded with synchronous, non-pipelined SFTP writes and a cancellable speed cap. Preserve fast mode.
+- Distinguish transport timeouts (retryable) from destination I/O errors (not silently retryable).
+- Retain the temporary-file then rename semantics and default skip-existing behaviour.
+- Test against a real USB target separately from mocked CI tests before claiming live reliability.
