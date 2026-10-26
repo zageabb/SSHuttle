@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+*.egg-info/
+dist/
+build/
+.DS_Store
+.idea/
+.vscode/
+*.pem
+id_rsa
+id_ed25519
+*.key
+known_hosts
