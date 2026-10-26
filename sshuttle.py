@@ -200,7 +200,7 @@ class SSHuttleApp:
         self.remote_path = StringVar(value="")
         self.overwrite = BooleanVar(value=False)
         self.connection_status = StringVar(value="Disconnected")
-        self.transfer_status = StringVar(value="Select files or folders on the left, then upload.")
+        self.transfer_status = StringVar(value="Choose files or folders on either side to transfer.")
         self.progress_label = StringVar(value="0%")
         self._connected = False
         self._busy = False
@@ -209,6 +209,8 @@ class SSHuttleApp:
         self._events: queue.Queue = queue.Queue()
         self._local_items: dict[str, Path] = {}
         self._remote_items: dict[str, tuple[str, bool]] = {}
+        self._remote_listed_path = ""
+        self._local_listed_path = Path.home()
 
         self._build_ui()
         self._show_local(Path.home())
@@ -255,9 +257,11 @@ class SSHuttleApp:
         controls.pack(fill=X, pady=(2, 8))
         self.upload_button = ttk.Button(controls, text="Upload selected  →", command=self._upload)
         self.upload_button.pack(side=LEFT)
+        self.download_button = ttk.Button(controls, text="← Download selected", command=self._download)
+        self.download_button.pack(side=LEFT, padx=(8, 0))
         self.cancel_button = ttk.Button(controls, text="Cancel transfer", command=self._cancel, state="disabled")
         self.cancel_button.pack(side=LEFT, padx=8)
-        ttk.Checkbutton(controls, text="Replace existing remote files", variable=self.overwrite).pack(side=LEFT, padx=8)
+        ttk.Checkbutton(controls, text="Replace existing destination files", variable=self.overwrite).pack(side=LEFT, padx=8)
         ttk.Button(controls, text="Refresh", command=self._refresh).pack(side=RIGHT)
 
         progress_frame = ttk.Frame(outer)
@@ -307,6 +311,7 @@ class SSHuttleApp:
             messagebox.showerror("Local folder", str(exc))
             return
         self.local_path.set(str(path))
+        self._local_listed_path = path
         self.local_tree.delete(*self.local_tree.get_children())
         self._local_items.clear()
         for name, is_dir, size, child in entries:
@@ -379,7 +384,25 @@ class SSHuttleApp:
             return
         self._cancel_transfer.clear()
         self._set_busy(True)
-        self._work.put(("upload", (Path(self.local_path.get()).resolve(), selected, remote_dir, self.overwrite.get())))
+        self._work.put(("upload", (self._local_listed_path, selected, remote_dir, self.overwrite.get())))
+
+    def _download(self):
+        if not self._connected or self._busy:
+            messagebox.showinfo("SSHuttle", "Connect to the server first and finish any current transfer.")
+            return
+        selected = [self._remote_items[item][0] for item in self.remote_tree.selection()
+                    if item in self._remote_items]
+        if not selected:
+            messagebox.showinfo("SSHuttle", "Select one or more files or folders in the right panel.")
+            return
+        local_dir = self._local_listed_path
+        if not local_dir.is_dir():
+            messagebox.showerror("Local folder", "Choose a valid local destination folder.")
+            return
+        self._cancel_transfer.clear()
+        self._set_busy(True)
+        self._work.put(("download", (self._remote_listed_path, selected,
+                                     local_dir, self.overwrite.get())))
 
     def _cancel(self):
         self._cancel_transfer.set()
@@ -398,6 +421,7 @@ class SSHuttleApp:
     def _set_busy(self, value):
         self._busy = value
         self.upload_button.configure(state="disabled" if value else "normal")
+        self.download_button.configure(state="disabled" if value else "normal")
         self.cancel_button.configure(state="normal" if value else "disabled")
         self.connect_button.configure(state="disabled" if value else "normal")
 
@@ -421,6 +445,7 @@ class SSHuttleApp:
                     self.connection_status.set("Disconnected")
                     self.remote_tree.delete(*self.remote_tree.get_children())
                     self._remote_items.clear()
+                    self._remote_listed_path = ""
                     self._log("Disconnected.")
                 elif kind == "connect_error":
                     self.connection_status.set("Connection failed")
@@ -430,6 +455,7 @@ class SSHuttleApp:
                     messagebox.showerror("SSH connection", str(payload))
                 elif kind == "remote_list":
                     path, entries = payload
+                    self._remote_listed_path = path
                     self.remote_path.set(path)
                     self.remote_tree.delete(*self.remote_tree.get_children())
                     self._remote_items.clear()
@@ -439,10 +465,10 @@ class SSHuttleApp:
                             values=("" if is_dir else human_size(size),))
                         self._remote_items[item_id] = (remote_name, is_dir)
                 elif kind == "started":
-                    total_files, total_bytes = payload
+                    direction, total_files, total_bytes = payload
                     self.progress_bar.configure(value=0)
                     self.progress_label.set("0%")
-                    self.transfer_status.set(f"Uploading {total_files} file(s), {human_size(total_bytes)}")
+                    self.transfer_status.set(f"{direction}ing {total_files} file(s), {human_size(total_bytes)}")
                 elif kind == "progress":
                     done, total, current_file = payload
                     percent = 100 if total == 0 else min(100, round(done / total * 100))
@@ -450,19 +476,22 @@ class SSHuttleApp:
                     self.progress_label.set(f"{percent}%")
                     self.transfer_status.set(f"{current_file} · {human_size(done)} / {human_size(total)}")
                 elif kind == "finished":
-                    completed, skipped, total = payload
+                    direction, completed, skipped, total = payload
                     self._set_busy(False)
                     if not self._cancel_transfer.is_set():
                         self.progress_bar.configure(value=100)
                         self.progress_label.set("100%")
-                    self.transfer_status.set(f"Complete: {completed} uploaded, {skipped} skipped, {total} considered.")
+                    self.transfer_status.set(f"Complete: {completed} {direction.lower()}ed, {skipped} skipped, {total} considered.")
                     self._log(self.transfer_status.get())
-                    self._work.put(("list", self.remote_path.get()))
+                    if direction == "Upload":
+                        self._work.put(("list", self._remote_listed_path))
+                    else:
+                        self._show_local(self._local_listed_path)
                 elif kind == "cancelled":
                     self._set_busy(False)
-                    self.transfer_status.set("Upload cancelled. Completed files remain on server.")
+                    self.transfer_status.set(f"{payload} cancelled. Completed files remain at the destination.")
                     self._log(self.transfer_status.get())
-                    self._work.put(("list", self.remote_path.get()))
+                    self._refresh()
                 elif kind == "error":
                     self._set_busy(False)
                     self.transfer_status.set(f"Error: {payload}")
@@ -519,19 +548,24 @@ class SSHuttleApp:
                             if attr.filename in (".", ".."):
                                 continue
                             is_dir = stat.S_ISDIR(attr.st_mode or 0)
-                            entries.append((attr.filename, is_dir, attr.st_size or 0,
+                            if not (is_dir or stat.S_ISREG(attr.st_mode or 0)):
+                            continue  # Do not allow selecting remote symlinks/special files.
+                        entries.append((attr.filename, is_dir, attr.st_size or 0,
                                             posixpath.join(path, attr.filename)))
                         entries.sort(key=lambda item: (not item[1], item[0].casefold()))
                         self._events.put(("remote_list", (path, entries)))
                     except Exception as exc:
                         self._events.put(("error", f"Cannot browse remote folder: {exc}"))
-                elif action == "upload":
+                elif action in ("upload", "download"):
                     try:
                         if sftp is None:
                             raise ConnectionError("Not connected.")
-                        self._send_files(sftp, *data)
+                        if action == "upload":
+                            self._send_files(sftp, *data)
+                        else:
+                            self._receive_files(sftp, *data)
                     except TransferCancelled:
-                        self._events.put(("cancelled", None))
+                        self._events.put(("cancelled", action.capitalize()))
                     except Exception as exc:
                         self._events.put(("error", str(exc)))
         finally:
@@ -571,7 +605,7 @@ class SSHuttleApp:
     def _send_files(self, sftp, local_root, selected_paths, remote_root, overwrite):
         dirs, files, skipped_links = manifest_for_upload(local_root, selected_paths)
         total = sum(size for _, _, size in files)
-        self._events.put(("started", (len(files), total)))
+        self._events.put(("started", ("Upload", len(files), total)))
         if skipped_links:
             self._events.put(("log", f"Skipped {skipped_links} symbolic links."))
         completed = 0
@@ -629,7 +663,7 @@ class SSHuttleApp:
             completed += 1
             done += size
             self._events.put(("progress", (done, total, relative_file)))
-        self._events.put(("finished", (completed, skipped, len(files) + skipped_links)))
+        self._events.put(("finished", ("Upload", completed, skipped, len(files) + skipped_links)))
 
     def _close(self):
         self._cancel_transfer.set()
