@@ -21,6 +21,15 @@
 - [ ] Drag-and-drop, improved keyboard navigation and transfer history.
 - [ ] Richer per-file progress and queue.
 
+## v0.2.1 — USB-safe upload option
+
+- [x] Optional non-pipelined SFTP uploads, with 32 KiB write chunks.
+- [x] Configurable 0–100 MiB/s rate limit (default 2 when enabled).
+- [x] Slower exponential retry backoff for stalled USB destinations.
+- [x] Unit tests for pacing, cancellation, size verification and original upload commits.
+- [ ] Validate transfers to a real USB-attached Ubuntu destination under load.
+- [ ] Investigate staging to internal disk with server-side deferred copying if USB stalls persist.
+
 ## v0.3 — Advanced
 
 - Resume/retry, checksums and collision preview.

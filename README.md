@@ -12,6 +12,7 @@ SSHuttle is a simple **Python desktop app** for transferring files from a local 
 - SSH host keys verified against ~/.ssh/known_hosts (no automatic acceptance of unknown host keys).
 - Existing destination files are skipped by default, with an explicit option to replace them.
 - Write transfers to temporary files, committing completed uploads/downloads safely.
+- Optional **USB-safe uploads**: 32 KiB acknowledged SFTP writes without pipelining, rate limit (default 2 MiB/s), and extended retry backoff.
 - Passwords are never written to disk.
 
 **Slow-server recovery:** 60-second connection timeout (configurable up to 300 seconds), 90-second minimum SSH authentication/banner timeouts, and longer SFTP inactivity timeouts. SSH keepalives every 30 seconds, plus three retries by default (configurable 0–5), automatically reconnect after temporary failures. A failed transfer attempt restarts the operation rather than resuming partway through an individual file.
@@ -64,6 +65,25 @@ A temporary disconnect triggers a new SSH connection and retries the operation. 
 When overwrite is selected, the server must support the SFTP posix-rename extension (typical for Ubuntu OpenSSH). If it is unavailable, SSHuttle leaves existing remote files intact and reports an error.
 
 In-flight temporary files are deleted on a best-effort basis after error/cancellation. If the SSH connection drops completely, remote orphaned `.sshuttle-*.part` files might remain and can be deleted after checking they are not part of an active transfer. Previously completed transfers remain. Symbolic links are not followed or transferred.
+
+## USB-attached drive reliability
+
+If Ubuntu is writing to an external USB disk that occasionally stalls, tick **USB-safe uploads** before pressing Upload. The mode uses acknowledged 32 KiB writes (no Paramiko SFTP pipelining), with an optional upload limit expressed in **MiB/s**. It defaults to **2 MiB/s** when enabled; set it to **0** for uncapped sequential transfers. The limit must be in the range 0–100 MiB/s.
+
+For a slow drive, try **USB-safe uploads ON**, **2 MiB/s**, **Connection timeout 120–180 seconds**, and **4 retries**. Reconnect to apply changes to SSH timeouts and retry count. USB-safe uploads use a 5, 10, 20, 30 second retry backoff after transient SSH errors; ordinary transfers retain shorter retries.
+
+USB-safe mode is OFF by default, so existing fast SFTP uploads are unchanged. Downloads are unaffected. This feature cannot fix a faulty USB cable, insufficient drive power, hardware resets, or disk filesystem I/O errors. A disconnect during an upload can leave a hidden remote temporary `.sshuttle-*.part` file; clean up after confirming it is not active.
+
+To diagnose errors on Ubuntu without changing drive data:
+
+```bash
+lsblk -o NAME,TRAN,SIZE,FSTYPE,MOUNTPOINTS,MODEL
+lsusb -t
+df -h /path/to/usb/mount
+sudo journalctl -k --since "30 minutes ago" --no-pager | grep -Ei 'usb|uas|reset|i/o error|buffer i/o|ext4|exfat|ntfs|xfs'
+```
+
+Look for USB resets/disconnects or I/O errors. Try a different cable/port and powered hub for bus-powered disks, especially if a drive disconnects under load. A safe next architectural option if stalls persist is **upload into an internal Ubuntu staging directory and move to USB using an independent server-side worker**, so the SFTP connection never waits for the slow final drive.
 
 ## Test
 
