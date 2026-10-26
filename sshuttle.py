@@ -796,10 +796,12 @@ class SSHuttleApp:
                         done += size
                         continue
                     sftp.rename(temporary, destination)
-            except BaseException:
+            except Exception:
                 try:
                     sftp.remove(temporary)
-                except OSError:
+                except Exception:
+                    # A disconnected SFTP channel may also fail cleanup.
+                    # Preserve the original error so recovery can retry it.
                     pass
                 raise
             completed += 1
